@@ -1,0 +1,158 @@
+#!/usr/bin/env python3
+
+#import numpy as np
+from NatNetClient import NatNetClient
+#import numpy
+import math
+import rospy
+from operator import mod
+from opti_msgs.msg import Odom
+
+rigidBodyID = 1 
+sampleInterval = 10
+
+sampleCount = 0
+deltaTime = 0
+lastTimestamp = 0
+Position = [0,0,0]
+lastPosition = [0,0,0]
+Angle = [0,0,0]
+lastAngle = [0,0,0]
+linearVelocity = [0,0,0]
+angularVelocity = [0,0,0]
+topicName = 'agent%s_odom'%rigidBodyID
+nodeName = 'agent%s_opti'%rigidBodyID
+
+###########################################
+######### calculate Euler Angles ##########
+###########################################
+def quaternion_to_euler_angle(w, x, y, z):
+    t0 = +2.0 * (w * x + y * z)
+    t1 = +1.0 - 2.0 * (x * x + y * y)
+    roll = (math.atan2(t0, t1))
+    t2 = +2.0 * (w * y - z * x)
+    t2 = +1.0 if t2 > +1.0 else t2
+    t2 = -1.0 if t2 < -1.0 else t2
+    pitch = (math.asin(t2))
+    t3 = +2.0 * (w * z + x * y)
+    t4 = +1.0 - 2.0 * (y * y + z * z)
+    yaw = (math.atan2(t3, t4))
+    return roll, pitch, yaw
+
+###########################################
+###### calculate Differential Angles ######
+###########################################
+def angDiff(ang_start, ang_end):
+    ang = ang_end - ang_start
+    ang = mod(ang+math.pi,2*math.pi) - math.pi
+    return ang
+    
+###########################################
+######## calculate deltaTime Opti  ########
+###########################################
+def receiveNewFrame( frameNumber, markerSetCount, unlabeledMarkersCount, rigidBodyCount, skeletonCount,
+                    labeledMarkerCount, timecode, timecodeSub, timestamp, isRecording, trackedModelsChanged ):
+    #rospy.loginfo(frameNumber)
+    global lastTimestamp
+    global deltaTime
+    global sampleCount
+    
+    if lastTimestamp==0:
+        lastTimestamp = timestamp
+        return
+    
+    if sampleCount==sampleInterval:
+        deltaTime = timestamp - lastTimestamp
+        lastTimestamp = timestamp
+    #rospy.loginfo(deltaTime)
+
+###########################################
+######### calculate the odometry ##########
+###########################################
+def receiveRigidBodyFrame(id, position, rotation):
+    #rospy.loginfo(id)
+    if id==rigidBodyID:
+        global Position
+        global lastPosition
+        global linearVelocity
+        global Angle
+        global lastAngle
+        global angularVelocity
+        global lastTimestamp
+        global deltaTime
+        global sampleCount
+        
+        if lastTimestamp==0:
+            return
+        
+        dT = deltaTime
+        #rospy.loginfo(dT)
+        
+        Position = position
+        Angle = quaternion_to_euler_angle(rotation[3], rotation[0], rotation[1], rotation[2])
+        
+        if sampleCount==sampleInterval:
+            sampleCount = 0
+            linearVelocity[0] = (Position[0]-lastPosition[0]) / dT
+            linearVelocity[1] = (Position[1]-lastPosition[1]) / dT
+            linearVelocity[2] = (Position[2]-lastPosition[2]) / dT
+            
+            angularVelocity[0] = angDiff(lastAngle[0],Angle[0]) / dT
+            angularVelocity[1] = angDiff(lastAngle[1],Angle[1]) / dT
+            angularVelocity[2] = angDiff(lastAngle[2],Angle[2]) / dT
+        
+        sampleCount = sampleCount + 1
+        lastPosition = Position
+        lastAngle = Angle
+    
+###########################################
+########### publish the topic #############
+###########################################
+def pub():
+    global Position
+    global Angle
+    global linearVelocity
+    global angularVelocity
+    global deltaTime
+    
+    rospy.init_node(nodeName, anonymous=False)
+    pub = rospy.Publisher(topicName, Odom, queue_size=10)
+    msg = Odom()
+    msg.header.frame_id = "inertial"
+    msg.rigidBodyID = rigidBodyID
+    rate = rospy.Rate(100) # hz
+    rospy.loginfo("OK")
+    while not rospy.is_shutdown():
+        msg.header.stamp = rospy.get_rostime()
+        msg.deltaTime = deltaTime
+        msg.position.x = Position[0]
+        msg.position.y = Position[1]
+        msg.position.z = Position[2]
+        msg.euler.x = Angle[0]
+        msg.euler.y = Angle[1]
+        msg.euler.z = Angle[2]
+        msg.linear.x = linearVelocity[0]
+        msg.linear.y = linearVelocity[1]
+        msg.linear.z = linearVelocity[2]
+        msg.angular.x = angularVelocity[0]
+        msg.angular.y = angularVelocity[1]
+        msg.angular.z = angularVelocity[2]
+        
+        #print(linearVelocity,angularVelocity)
+        #rospy.loginfo(msg.header.stamp)
+        pub.publish(msg)
+        rate.sleep()
+
+###########################################
+##################  main ##################
+###########################################
+if __name__ == '__main__':
+    streamingClient = NatNetClient("172.16.6.124")
+    streamingClient.rigidBodyListener = receiveRigidBodyFrame
+    streamingClient.newFrameListener = receiveNewFrame
+    streamingClient.run()
+    
+    try:
+        pub()
+    except rospy.ROSInterruptException:
+        pass
